@@ -1,9 +1,9 @@
 defmodule Readability.Sanitizer do
   @moduledoc """
-  Clean an element of all tags of type "tag" if they look fishy.
+  Cleans article HTML trees by removing fishy elements.
 
-  "Fishy" is an algorithm based on content length, classnames, link density,
-  number of images & embeds, etc.
+  Uses an algorithm based on content length, class names, link density,
+  number of images/embeds, and other heuristics.
   """
 
   alias Readability.Candidate
@@ -14,31 +14,31 @@ defmodule Readability.Sanitizer do
   @type html_tree :: tuple | list
 
   @doc """
-  Sanitizes article HTML tree.
+  Sanitizes an article HTML tree by removing headlines, unlikely tags,
+  empty paragraphs, and optionally performing conditional cleaning.
   """
   @spec sanitize(html_tree, [Candidate.t()], list) :: html_tree
   def sanitize(html_tree, candidates, opts \\ []) do
     html_tree =
       html_tree
-      |> Helper.remove_tag(&clean_headline_tag?(&1))
-      |> Helper.remove_tag(&clean_unlikely_tag?(&1))
-      |> Helper.remove_tag(&clean_empty_p?(&1))
+      |> Helper.remove_tag(&clean_headline_tag?/1)
+      |> Helper.remove_tag(&clean_unlikely_tag?/1)
+      |> Helper.remove_tag(&clean_empty_p?/1)
 
     if opts[:clean_conditionally] do
-      html_tree |> Helper.remove_tag(conditionally_cleaing_fn(candidates))
+      Helper.remove_tag(html_tree, conditionally_cleaning_fn(candidates))
     else
       html_tree
     end
   end
 
-  defp conditionally_cleaing_fn(candidates) do
+  defp conditionally_cleaning_fn(candidates) do
     fn {tag, attrs, _} = tree ->
-      if Enum.any?(["table", "ul", "div"], &(&1 == tag)) do
+      if tag in ["table", "ul", "div"] do
         weight = Scoring.class_weight(attrs)
 
         same_tree =
-          candidates
-          |> Enum.find(%Candidate{}, &(&1.html_tree == tree))
+          Enum.find(candidates, %Candidate{}, &(&1.html_tree == tree))
 
         list? = tag == "ul"
 
@@ -47,34 +47,24 @@ defmodule Readability.Sanitizer do
             true
 
           Queries.count_character(tree, ",") < 10 ->
-            # If there are not very many commas, and the number of
-            # non-paragraph elements is more than paragraphs or other
-            # ominous signs, remove the element.
-            p_len = tree |> Queries.find_tag("p") |> length
-            img_len = tree |> Queries.find_tag("img") |> length
-            li_len = tree |> Queries.find_tag("li") |> length
-            input_len = tree |> Queries.find_tag("input") |> length
+            p_len = tree |> Queries.find_tag("p") |> length()
+            img_len = tree |> Queries.find_tag("img") |> length()
+            li_len = tree |> Queries.find_tag("li") |> length()
+            input_len = tree |> Queries.find_tag("input") |> length()
 
             embed_len =
               tree
               |> Queries.find_tag("embed")
-              |> Enum.reject(&(&1 =~ Readability.regexes(:video)))
-              |> length
+              |> Enum.reject(&(Queries.text(&1) =~ Readability.regex(:video)))
+              |> length()
 
             link_density = Scoring.calc_link_density(tree)
-            conent_len = Queries.text_length(tree)
+            content_len = Queries.text_length(tree)
 
-            # too many image
-            # more <li>s than <p>s
-            # less than 3x <p>s than <input>s
-            # too short a content length without a single image
-            # too many links for its weight (#{weight})
-            # too many links for its weight (#{weight})
-            # <embed>s with too short a content length, or too many <embed>s
             img_len > p_len || (!list? && li_len > p_len) || input_len > p_len / 3 ||
-              (!list? && conent_len < Readability.regexes(:min_text_length) && img_len != 1) ||
+              (!list? && content_len < 25 && img_len != 1) ||
               (weight < 25 && link_density > 0.2) || (weight >= 25 && link_density > 0.5) ||
-              ((embed_len == 1 && conent_len < 75) || embed_len > 1)
+              ((embed_len == 1 && content_len < 75) || embed_len > 1)
 
           true ->
             false
@@ -89,8 +79,8 @@ defmodule Readability.Sanitizer do
   end
 
   defp clean_unlikely_tag?({tag, attrs, _}) do
-    attrs_str = attrs |> Enum.map(&elem(&1, 1)) |> Enum.join("")
-    tag =~ ~r/form|object|iframe|embed/ && !(attrs_str =~ Readability.regexes(:video))
+    attrs_str = Enum.map_join(attrs, "", &elem(&1, 1))
+    tag =~ ~r/form|object|iframe|embed/ && !(attrs_str =~ Readability.regex(:video))
   end
 
   defp clean_empty_p?({tag, _, _} = html_tree) do

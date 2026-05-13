@@ -1,12 +1,14 @@
 defmodule Readability.Helper do
   @moduledoc """
-  Helpers for parsing, updating, and removing HTML tree.
+  Helpers for parsing, updating, and removing HTML tree nodes.
+
+  Operates on LazyHTML tree tuples `{tag, attrs, children}`.
   """
 
   @type html_tree :: tuple | list
 
   @doc """
-  Change existing tags by selector.
+  Change existing tags by selector (tag name match).
   """
   @spec change_tag(html_tree, String.t(), String.t()) :: html_tree
   def change_tag(content, _, _) when is_binary(content), do: content
@@ -25,7 +27,9 @@ defmodule Readability.Helper do
   end
 
   @doc """
-  Remove html attributes
+  Remove HTML attributes matching the given filter.
+
+  Filter can be a string (exact match), a regex, or a list of strings.
   """
   @spec remove_attrs(html_tree, String.t() | [String.t()] | Regex.t()) :: html_tree
   def remove_attrs(content, _) when is_binary(content), do: content
@@ -41,8 +45,7 @@ defmodule Readability.Helper do
         is_binary(target_attr) ->
           fn attr -> elem(attr, 0) == target_attr end
 
-        # compatibility with older versions of Elixir where is no is_struct/2
-        is_struct(target_attr) and :erlang.map_get(:__struct__, target_attr) == Regex ->
+        is_struct(target_attr, Regex) ->
           fn attr -> elem(attr, 0) =~ target_attr end
 
         is_list(target_attr) ->
@@ -56,12 +59,12 @@ defmodule Readability.Helper do
   end
 
   @doc """
-  Removes tags.
+  Removes nodes from the tree where the predicate function returns true.
   """
   @spec remove_tag(html_tree, fun) :: html_tree
   def remove_tag(content, _) when is_binary(content), do: content
   def remove_tag([], _), do: []
-  def remove_tag([{:doctype, _, _, _} | t], fun), do: remove_tag(t, fun)
+  def remove_tag([{:comment, _} | t], fun), do: remove_tag(t, fun)
 
   def remove_tag([h | t], fun) do
     node = remove_tag(h, fun)
@@ -82,57 +85,21 @@ defmodule Readability.Helper do
   end
 
   @doc """
-  Normalizes and parses to HTML tree (tuple or list)) from binary HTML.
+  Normalizes and parses raw HTML into a tree (list of tuples).
+
+  Performs pre-processing: strips XML declarations, normalizes whitespace,
+  converts double `<br>` tags to paragraph breaks, replaces `<font>` with
+  `<span>`, then parses via LazyHTML.
   """
-  @spec normalize(binary, list) :: html_tree
-  def normalize(raw_html, opts \\ []) do
+  @spec normalize(binary) :: html_tree
+  def normalize(raw_html) do
     raw_html
-    |> String.replace(Readability.regexes(:replace_xml_version), "")
-    |> String.replace(Readability.regexes(:replace_brs), "</p><p>")
-    |> String.replace(Readability.regexes(:replace_fonts), "<\\1span>")
-    |> String.replace(Readability.regexes(:normalize), " ")
-    |> transform_img_paths(opts[:url])
-    |> Floki.parse_document!()
-    |> Floki.filter_out(:comment)
+    |> String.replace(Readability.regex(:replace_xml_version), "")
+    |> String.replace(Readability.regex(:replace_brs), "</p><p>")
+    |> String.replace(Readability.regex(:replace_fonts), "<\\1span>")
+    |> String.replace(Readability.regex(:normalize), " ")
+    |> LazyHTML.from_document()
+    |> LazyHTML.to_tree(skip_whitespace_nodes: true)
     |> remove_tag(fn {tag, _, _} -> is_atom(tag) end)
-  end
-
-  # Turn relative `img` tag paths into absolute if possible
-  defp transform_img_paths(html_str, nil), do: html_str
-
-  defp transform_img_paths(html_str, url) do
-    Readability.regexes(:img_tag_src)
-    |> Regex.replace(html_str, &build_img_path(url, &1, &2, &3, &4))
-  end
-
-  defp build_img_path(url, _str, pre_src, src, post_src) do
-    new_src =
-      case URI.parse(src) do
-        %URI{host: nil} ->
-          base_url = base_url(url)
-          scrubbed_src = String.trim_leading(src, "/")
-
-          base_url <> "/" <> scrubbed_src
-
-        _ ->
-          src
-      end
-
-    pre_src <> new_src <> post_src
-  end
-
-  # Get the base url of a given url, including its scheme.
-  # E.g: both http://elixir-lang.org/guides and elixir-lang.org/guides
-  # would return http://elixir-lang.org
-  defp base_url(url) do
-    scheme_regex = ~r/^(https?:\/\/)?(.*)/i
-    path_regex = ~r/^([^\/]+)(.*)/i
-
-    url_without_scheme = Regex.replace(scheme_regex, url, "\\2")
-    base_url = Regex.replace(path_regex, url_without_scheme, "\\1")
-
-    scheme = URI.parse(url).scheme || "http"
-
-    scheme <> "://" <> base_url
   end
 end

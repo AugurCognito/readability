@@ -1,41 +1,33 @@
 defmodule Readability do
   @moduledoc """
-  Readability library for extracting & curating articles.
+  Readability library for extracting and curating articles from raw HTML.
+
+  Uses LazyHTML (Rust NIF) for HTML parsing. Accepts raw HTML strings only —
+  does not fetch URLs.
 
   ## Example
 
-  ```elixir
-  @type html :: binary
+      # Extract article text
+      {:ok, text} = Readability.extract(html)
 
-  # Just pass url
-  %Readability.Summary{title: title, authors: authors, article_html: article} = Readability.summarize(url)
+      # Extract title
+      title = Readability.extract_title(html)
 
-  # Extract title
-  Readability.title(html)
+      # Extract authors
+      authors = Readability.extract_authors(html)
 
-  # Extract published at
-  Readability.published_at(html)
+      # Extract published date
+      datetime = Readability.extract_published_at(html)
 
-  # Extract authors.
-  Readability.authors(html)
-
-  # Extract only text from article
-  article = html
-            |> Readability.article
-            |> Readability.readable_text
-
-  # Extract article with transformed html
-  article = html
-            |> Readability.article
-            |> Readability.raw_html
-  ```
+      # Extract article tree (for advanced use)
+      article_tree = Readability.article(html)
+      html_string = Readability.readable_html(article_tree)
   """
 
   alias Readability.ArticleBuilder
   alias Readability.AuthorFinder
   alias Readability.Helper
   alias Readability.PublishedAtFinder
-  alias Readability.Summary
   alias Readability.TitleFinder
 
   @default_options [
@@ -49,220 +41,162 @@ defmodule Readability do
     min_image_height: 80,
     ignore_image_format: [],
     blacklist: nil,
-    whitelist: nil,
-    page_url: nil
+    whitelist: nil
   ]
 
-  @markup_mimes ~r/^(application|text)\/[a-z\-_\.\+]+ml(;\s*charset=.*)?$/i
-
   @type html_tree :: tuple | list
-  @type raw_html :: binary
-  @type url :: binary
   @type options :: list
-  @type headers :: list[tuple]
+
+  # --- Regexes (module attributes, not public functions) ---
+
+  @re_unlikely_candidate ~r/combx|comment|community|disqus|extra|foot|header|hidden|lightbox|modal|menu|meta|nav|remark|rss|shoutbox|sidebar|sponsor|ad-break|agegate|pagination|pager|popup/i
+  @re_ok_maybe_candidate ~r/and|article|body|column|main|shadow/i
+  @re_positive ~r/article|body|content|entry|hentry|main|page|pagination|post|text|blog|story/i
+  @re_negative ~r/hidden|^hid|combx|comment|com-|contact|foot|footer|footnote|link|masthead|media|meta|outbrain|promo|related|scroll|shoutbox|sidebar|sponsor|shopping|tags|tool|utility|widget/i
+  @re_div_to_p_elements ~r/<(a|blockquote|dl|div|img|ol|p|pre|table|ul)/i
+  @re_replace_brs ~r/(<br[^>]*>[ \n\r\t]*){2,}/i
+  @re_replace_fonts ~r/<(\/?)font[^>]*>/i
+  @re_replace_xml_version ~r/<\?xml.*\?>/i
+  @re_normalize ~r/\s{2,}/
+  @re_video ~r/\/\/(www\.)?(dailymotion|youtube|youtube-nocookie|player\.vimeo)\.com/i
+  @re_protect_attrs ~r/^(?!id|rel|for|summary|title|href|src|alt|srcdoc)/i
+
+  # --- Public API ---
 
   @doc """
-  Summarize the primary readable content of a webpage.
+  Extract the main article text from raw HTML.
+
+  Returns `{:ok, text}` with the article body as plain text,
+  or `{:error, :no_content}` if no meaningful content was found.
   """
-  @spec summarize(url, options) :: Summary.t()
-  def summarize(url, opts \\ []) do
-    opts = Keyword.merge(opts, page_url: url)
-    httpoison_options = Application.get_env(:readability, :httpoison_options, [])
-    %{status_code: _, body: raw, headers: headers} = HTTPoison.get!(url, [], httpoison_options)
+  @spec extract(binary) :: {:ok, binary} | {:error, :no_content}
+  def extract(html) when is_binary(html) do
+    article_tree = article(html)
+    text = readable_text(article_tree)
 
-    case is_response_markup(headers) do
-      true ->
-        html_tree = Helper.normalize(raw, url: url)
-        article_tree = ArticleBuilder.build(html_tree, opts)
-
-        %Summary{
-          title: title(html_tree),
-          authors: authors(html_tree),
-          published_at: published_at(html_tree),
-          article_html: readable_html(article_tree),
-          article_text: readable_text(article_tree)
-        }
-
-      _ ->
-        %Summary{title: nil, authors: nil, article_html: nil, article_text: raw}
+    if String.length(text) >= @default_options[:min_text_length] do
+      {:ok, text}
+    else
+      {:error, :no_content}
     end
   end
 
   @doc """
-  Extract MIME Type from headers.
+  Extract the article title from raw HTML.
 
-  ## Example
-
-      iex> mime = Readability.mime(headers_list)
-      "text/html"
-
+  Checks og:title meta tag first, then falls back to `<title>` tag,
+  then to `<h1>` tag.
   """
-  @spec mime(headers) :: String.t()
-  def mime(headers \\ []) do
-    headers
-    |> Enum.find(
-      # default
-      {"Content-Type", "text/plain"},
-      fn {key, _} -> String.downcase(key) == "content-type" end
-    )
-    |> elem(1)
+  @spec extract_title(binary) :: binary | nil
+  def extract_title(html) when is_binary(html) do
+    tree = Helper.normalize(html)
+
+    case TitleFinder.title(tree) do
+      "" -> nil
+      title -> title
+    end
   end
 
   @doc """
-  Returns true if Content-Type in provided headers list is a markup type,
-  else false.
+  Extract article authors from raw HTML.
 
-  ## Example
-
-      iex> Readability.is_response_markup?([{"Content-Type", "text/html"}])
-      true
-
+  Looks for author meta tags (`name=author`, `property=*author`).
   """
-  @spec is_response_markup(headers) :: boolean
-  def is_response_markup(headers) do
-    mime(headers) =~ @markup_mimes
+  @spec extract_authors(binary) :: [binary]
+  def extract_authors(html) when is_binary(html) do
+    html
+    |> Helper.normalize()
+    |> AuthorFinder.find()
   end
 
   @doc """
-  Extract title
+  Extract the publication date from raw HTML.
 
-  ## Example
-
-      iex> title = Readability.title(html_str)
-      "Some title in html"
-
+  Checks meta tags, `<time>` elements, and `data-datetime` attributes.
   """
-  @spec title(binary | html_tree) :: binary
-  def title(raw_html) when is_binary(raw_html) do
-    raw_html
-    |> Floki.parse_document!()
-    |> title
+  @spec extract_published_at(binary) :: DateTime.t() | Date.t() | nil
+  def extract_published_at(html) when is_binary(html) do
+    html
+    |> Helper.normalize()
+    |> PublishedAtFinder.find()
   end
 
-  def title(html_tree), do: TitleFinder.title(html_tree)
-
   @doc """
-  Extract authors.
+  Extract the article tree from raw HTML.
 
-  ## Example
+  Uses content scoring, class/id weighting, link density analysis, and
+  retry heuristics to find the most likely article content.
 
-      iex> authors = Readability.authors(html_str)
-      ["José Valim", "chrismccord"]
-
-  """
-  @spec authors(binary | html_tree) :: list[binary]
-  def authors(html) when is_binary(html), do: html |> Floki.parse_document!() |> authors
-  def authors(html_tree), do: AuthorFinder.find(html_tree)
-
-  @doc """
-  Extract published_at
-
-  ## Example
-
-      iex> datetime = Readability.published_at(html_str)
-      %DateTime{}
-
-  """
-  @spec published_at(binary | html_tree) :: %DateTime{} | %Date{} | nil
-  def published_at(raw_html) when is_binary(raw_html) do
-    raw_html
-    |> Floki.parse_document!()
-    |> published_at()
-  end
-
-  def published_at(html_tree), do: PublishedAtFinder.find(html_tree)
-
-  @doc """
-  Using a variety of metrics (content score, classname, element types), find the content that is
-  most likely to be the stuff a user wants to read.
-
-  ## Example
-
-      iex> article_tree = Redability(html_str)
-      # returns article that is tuple
-
+  Returns an HTML tree suitable for `readable_html/1` or `readable_text/1`.
   """
   @spec article(binary, options) :: html_tree
-  def article(raw_html, opts \\ []) do
+  def article(html, opts \\ []) do
     opts = Keyword.merge(@default_options, opts)
 
-    raw_html
+    html
     |> Helper.normalize()
     |> ArticleBuilder.build(opts)
   end
 
   @doc """
-  Returns attributes, tags cleaned HTML.
+  Returns cleaned HTML from an article tree (strips non-essential attributes).
   """
   @spec readable_html(html_tree) :: binary
   def readable_html(html_tree) do
     html_tree
-    |> Helper.remove_attrs(regexes(:protect_attrs))
-    |> raw_html
+    |> Helper.remove_attrs(regex(:protect_attrs))
+    |> raw_html()
   end
 
   @doc """
-  Returns only text binary from `html_tree`.
+  Returns only text from an article tree.
   """
   @spec readable_text(html_tree) :: binary
   def readable_text(html_tree) do
-    # @TODO: Remove image caption when extract only text
     tags_to_br = ~r/<\/(p|div|article|h\d)/i
-    html_str = html_tree |> raw_html
+    html_str = raw_html(html_tree)
 
     tags_to_br
     |> Regex.replace(html_str, &"\n#{&1}")
-    |> Floki.parse_fragment!()
-    |> Floki.text()
+    |> then(fn str ->
+      str
+      |> LazyHTML.from_fragment()
+      |> LazyHTML.text()
+    end)
     |> String.trim()
   end
 
   @doc """
-  Returns raw HTML binary from `html_tree`.
+  Returns raw HTML from an HTML tree.
   """
   @spec raw_html(html_tree) :: binary
   def raw_html(html_tree) do
-    html_tree |> Floki.raw_html(encode: false)
+    html_tree
+    |> List.wrap()
+    |> LazyHTML.Tree.to_html()
   end
 
-  @deprecated "Use `Floki.parse_document/1` or `Floki.parse_fragment/1` instead."
-  def parse(raw_html) when is_binary(raw_html) do
-    with {:ok, document} <- Floki.parse_document(raw_html) do
-      document
-    end
-  end
+  @doc """
+  Access regex patterns used by the readability algorithm.
 
-  def regexes(:unlikely_candidate),
-    do:
-      ~r/combx|comment|community|disqus|extra|foot|header|hidden|lightbox|modal|menu|meta|nav|remark|rss|shoutbox|sidebar|sponsor|ad-break|agegate|pagination|pager|popup/i
+  These are used internally by sub-modules for scoring, cleaning,
+  and normalization.
+  """
+  @spec regex(atom) :: Regex.t() | nil
+  def regex(:unlikely_candidate), do: @re_unlikely_candidate
+  def regex(:ok_maybe_its_a_candidate), do: @re_ok_maybe_candidate
+  def regex(:positive), do: @re_positive
+  def regex(:negative), do: @re_negative
+  def regex(:div_to_p_elements), do: @re_div_to_p_elements
+  def regex(:replace_brs), do: @re_replace_brs
+  def regex(:replace_fonts), do: @re_replace_fonts
+  def regex(:replace_xml_version), do: @re_replace_xml_version
+  def regex(:normalize), do: @re_normalize
+  def regex(:video), do: @re_video
+  def regex(:protect_attrs), do: @re_protect_attrs
+  def regex(_key), do: nil
 
-  def regexes(:ok_maybe_its_a_candidate), do: ~r/and|article|body|column|main|shadow/i
-
-  def regexes(:positive),
-    do: ~r/article|body|content|entry|hentry|main|page|pagination|post|text|blog|story/i
-
-  def regexes(:negative),
-    do:
-      ~r/hidden|^hid|combx|comment|com-|contact|foot|footer|footnote|link|masthead|media|meta|outbrain|promo|related|scroll|shoutbox|sidebar|sponsor|shopping|tags|tool|utility|widget/i
-
-  def regexes(:div_to_p_elements), do: ~r/<(a|blockquote|dl|div|img|ol|p|pre|table|ul)/i
-
-  def regexes(:replace_brs), do: ~r/(<br[^>]*>[ \n\r\t]*){2,}/i
-
-  def regexes(:replace_fonts), do: ~r/<(\/?)font[^>]*>/i
-
-  def regexes(:replace_xml_version), do: ~r/<\?xml.*\?>/i
-
-  def regexes(:normalize), do: ~r/\s{2,}/
-
-  def regexes(:video),
-    do: ~r/\/\/(www\.)?(dailymotion|youtube|youtube-nocookie|player\.vimeo)\.com/i
-
-  def regexes(:protect_attrs), do: ~r/^(?!id|rel|for|summary|title|href|src|alt|srcdoc)/i
-
-  def regexes(:img_tag_src), do: ~r/(<img.*src=['"])([^'"]+)(['"][^>]*>)/Ui
-
-  def regexes(_key), do: nil
-
+  @doc false
+  @spec default_options() :: options
   def default_options, do: @default_options
 end

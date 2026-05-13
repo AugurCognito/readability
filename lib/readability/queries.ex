@@ -1,19 +1,33 @@
 defmodule Readability.Queries do
   @moduledoc """
-  Highly-optimized utilities for quick answers about HTML tree
+  Optimized utilities for querying HTML tree structures.
+
+  Operates on LazyHTML tree tuples `{tag, attrs, children}`.
   """
 
   @type html_tree :: tuple | list
-  @type options :: list
 
-  def cache_stats_in_attributes(html_tree) do
-    Floki.traverse_and_update(html_tree, fn
-      {tag, attrs, nodes} ->
+  @doc """
+  Annotates tree nodes with cached `:text_length` and `:commas` in their
+  attributes for faster repeated lookups during scoring.
+  """
+  @spec cache_stats_in_attributes(html_tree) :: html_tree
+  def cache_stats_in_attributes(tree) do
+    LazyHTML.Tree.postwalk(tree, fn
+      {tag, attrs, nodes} = node ->
         attrs =
-          Keyword.put_new_lazy(attrs, :text_length, fn -> text_length({tag, attrs, nodes}) end)
+          if Keyword.has_key?(attrs, :text_length) do
+            attrs
+          else
+            Keyword.put(attrs, :text_length, text_length(node))
+          end
 
         attrs =
-          Keyword.put_new_lazy(attrs, :commas, fn -> count_character({tag, attrs, nodes}, ",") end)
+          if Keyword.has_key?(attrs, :commas) do
+            attrs
+          else
+            Keyword.put(attrs, :commas, count_character(node, ","))
+          end
 
         {tag, attrs, nodes}
 
@@ -22,8 +36,12 @@ defmodule Readability.Queries do
     end)
   end
 
-  def clear_stats_from_attributes(html_tree) do
-    Floki.traverse_and_update(html_tree, fn
+  @doc """
+  Removes cached stats from tree attributes.
+  """
+  @spec clear_stats_from_attributes(html_tree) :: html_tree
+  def clear_stats_from_attributes(tree) do
+    LazyHTML.Tree.postwalk(tree, fn
       {tag, attrs, nodes} ->
         {tag, Keyword.drop(attrs, [:text_length, :commas]), nodes}
 
@@ -33,22 +51,20 @@ defmodule Readability.Queries do
   end
 
   @doc """
-  Count only text length.
+  Counts the total text length in the tree.
   """
   @spec text_length(html_tree) :: number
-  def text_length(html_tree)
   def text_length(text) when is_binary(text), do: String.length(text)
   def text_length(nodes) when is_list(nodes), do: Enum.reduce(nodes, 0, &(&2 + text_length(&1)))
   def text_length({:comment, _}), do: 0
   def text_length({"br", _, _}), do: 1
 
   def text_length({_tag, attrs, nodes}) do
-    # we precompute that value
     Keyword.get_lazy(attrs, :text_length, fn -> text_length(nodes) end)
   end
 
   @doc """
-  Finds number of occurences of a given character, much faster than converting to text
+  Counts occurrences of a character in the tree's text content.
   """
   @spec count_character(html_tree, binary) :: number
   def count_character(<<v::utf8, rest::binary>>, <<v::utf8>> = char) do
@@ -71,11 +87,12 @@ defmodule Readability.Queries do
   def count_character(_node, _char), do: 0
 
   @doc """
-  Finds given tags in HTML tree, much faster than using generic selector
+  Finds all nodes with the given tag name in the tree.
   """
   @spec find_tag(html_tree, binary) :: list
   def find_tag(html_tree, tag), do: html_tree |> find_tag_internal(tag) |> List.flatten()
 
+  @doc false
   def find_tag_internal(nodes, tag) when is_list(nodes),
     do: Enum.map(nodes, &find_tag_internal(&1, tag))
 
@@ -84,4 +101,14 @@ defmodule Readability.Queries do
 
   def find_tag_internal({_, _, children}, tag), do: find_tag_internal(children, tag)
   def find_tag_internal(_, _), do: []
+
+  @doc """
+  Extracts the text content of the tree as a single string.
+  """
+  @spec text(html_tree) :: binary
+  def text(nodes) when is_list(nodes), do: Enum.map_join(nodes, &text/1)
+  def text({_tag, _attrs, children}), do: text(children)
+  def text(text) when is_binary(text), do: text
+  def text({:comment, _}), do: ""
+  def text(_), do: ""
 end

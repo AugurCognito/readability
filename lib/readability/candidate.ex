@@ -1,6 +1,6 @@
 defmodule Readability.Candidate do
   @moduledoc """
-  Candidate can be article.
+  A scored candidate node that may contain the article content.
   """
   defstruct html_tree: {}, score: 0, tree_depth: 0
 end

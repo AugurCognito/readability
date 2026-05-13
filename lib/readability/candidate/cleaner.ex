@@ -1,8 +1,8 @@
 defmodule Readability.Candidate.Cleaner do
   @moduledoc """
-  Clean HTML tree for prepare candidates.
+  Cleans the HTML tree to prepare candidates for scoring.
 
-  It transforms misused tags and removes unlikely candidates.
+  Transforms misused tags and removes unlikely candidate nodes.
   """
 
   alias Readability.Helper
@@ -10,7 +10,7 @@ defmodule Readability.Candidate.Cleaner do
   @type html_tree :: tuple | list
 
   @doc """
-  Transforms misused divs <div>s that do not contain other block elements into <p>s.
+  Transforms `<div>` tags that do not contain block-level elements into `<p>` tags.
   """
   @spec transform_misused_div_to_p(html_tree) :: html_tree
   def transform_misused_div_to_p(content) when is_binary(content), do: content
@@ -26,7 +26,7 @@ defmodule Readability.Candidate.Cleaner do
   end
 
   @doc """
-  Removes unlikely HTML tree.
+  Removes nodes that are unlikely to be article content.
   """
   @spec remove_unlikely_tree(html_tree) :: html_tree
   def remove_unlikely_tree(html_tree) do
@@ -34,7 +34,8 @@ defmodule Readability.Candidate.Cleaner do
   end
 
   defp misused_divs?("div", inner_tree) do
-    !(Floki.raw_html(inner_tree) =~ Readability.regexes(:div_to_p_elements))
+    inner_html = inner_tree |> List.wrap() |> LazyHTML.Tree.to_html()
+    !(inner_html =~ Readability.regex(:div_to_p_elements))
   end
 
   defp misused_divs?(_, _), do: false
@@ -42,13 +43,12 @@ defmodule Readability.Candidate.Cleaner do
   defp unlikely_tree?({tag, attrs, _}) do
     idclass_str =
       attrs
-      |> Enum.filter(&(elem(&1, 0) =~ ~r/id|class/i))
-      |> Enum.map(&elem(&1, 1))
-      |> Enum.join("")
+      |> Enum.filter(fn {k, _} -> k =~ ~r/id|class/i end)
+      |> Enum.map_join("", fn {_, v} -> v end)
 
     str = tag <> idclass_str
 
-    str =~ Readability.regexes(:unlikely_candidate) &&
-      !(str =~ Readability.regexes(:ok_maybe_its_a_candidate)) && tag != "html"
+    str =~ Readability.regex(:unlikely_candidate) &&
+      !(str =~ Readability.regex(:ok_maybe_its_a_candidate)) && tag != "html"
   end
 end

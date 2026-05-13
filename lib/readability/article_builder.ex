@@ -1,6 +1,10 @@
 defmodule Readability.ArticleBuilder do
   @moduledoc """
-  Build article for readability.
+  Builds the article tree from scored candidates.
+
+  Orchestrates the full pipeline: tag removal, unlikely candidate pruning,
+  div-to-p transformation, scoring, article selection, and sanitization.
+  Retries with relaxed heuristics if the initial extraction is too short.
   """
 
   alias Readability.Candidate
@@ -15,9 +19,10 @@ defmodule Readability.ArticleBuilder do
   @type options :: list
 
   @doc """
-  Prepare the article node for display.
+  Extracts the article tree from a parsed HTML tree.
 
-  Clean out any inline styles, iframes, forms, strip extraneous <p> tags, etc.
+  Cleans, scores, selects the best candidate, sanitizes, and retries
+  with relaxed options if the result is too short.
   """
   @spec build(html_tree, options) :: html_tree
   def build(html_tree, opts) do
@@ -26,7 +31,7 @@ defmodule Readability.ArticleBuilder do
     html_tree =
       html_tree
       |> Helper.remove_tag(fn {tag, _, _} ->
-        Enum.member?(["script", "style"], tag)
+        tag in ["script", "style"]
       end)
 
     html_tree =
@@ -80,7 +85,7 @@ defmodule Readability.ArticleBuilder do
         find_article_trees(best_candidate, candidates)
       else
         fallback_candidate =
-          case html_tree |> Queries.find_tag("body") do
+          case Queries.find_tag(html_tree, "body") do
             [tree | _] -> %Candidate{html_tree: tree}
             _ -> %Candidate{html_tree: {}}
           end
@@ -105,9 +110,10 @@ defmodule Readability.ArticleBuilder do
   defp append?(%Candidate{html_tree: html_tree}) when elem(html_tree, 0) == "p" do
     link_density = Scoring.calc_link_density(html_tree)
     inner_length = Queries.text_length(html_tree)
+    node_text = Queries.text(html_tree)
 
     (inner_length > 80 && link_density < 0.25) ||
-      (inner_length < 80 && link_density == 0 && Floki.text(html_tree) =~ ~r/\.( |$)/)
+      (inner_length < 80 && link_density == 0 && node_text =~ ~r/\.( |$)/)
   end
 
   defp append?(_), do: false

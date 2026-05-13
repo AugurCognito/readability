@@ -1,7 +1,11 @@
 defmodule Readability.Candidate.Scoring do
   @moduledoc """
-  Score HTML tree.
+  Scores HTML tree nodes based on content heuristics.
+
+  Considers element type, class/id weight, text density, link density,
+  and content depth to produce a readability score.
   """
+
   alias Readability.Queries
 
   @element_scores %{"div" => 5, "blockquote" => 3, "form" => -3, "th" => -5}
@@ -10,9 +14,10 @@ defmodule Readability.Candidate.Scoring do
   @type options :: list
 
   @doc """
-  Score HTML tree by some algorithm that check children nodes, attributes, link densities, etcs..
+  Scores an HTML tree node using content analysis heuristics.
 
-  options -> weight_classes :: boolean, calculate weight class.
+  Combines node score, children/grandchildren content scores, and
+  penalizes by link density.
   """
   @spec calc_score(html_tree, options) :: number
   def calc_score(html_tree, opts \\ []) do
@@ -44,18 +49,28 @@ defmodule Readability.Candidate.Scoring do
 
   defp calc_node_score([], _), do: 0
 
+  @doc """
+  Calculates a weight based on the class and id attributes.
+
+  Positive class/id patterns add weight; negative patterns subtract.
+  """
+  @spec class_weight(list) :: number
   def class_weight(attrs) do
     weight = 0
     class = attrs |> List.keyfind("class", 0, {"", ""}) |> elem(1)
     id = attrs |> List.keyfind("id", 0, {"", ""}) |> elem(1)
 
-    weight = if class =~ Readability.regexes(:positive), do: weight + 25, else: weight
-    weight = if id =~ Readability.regexes(:positive), do: weight + 25, else: weight
-    weight = if class =~ Readability.regexes(:negative), do: weight - 25, else: weight
-    weight = if id =~ Readability.regexes(:negative), do: weight - 25, else: weight
+    weight = if class =~ Readability.regex(:positive), do: weight + 25, else: weight
+    weight = if id =~ Readability.regex(:positive), do: weight + 25, else: weight
+    weight = if class =~ Readability.regex(:negative), do: weight - 25, else: weight
+    weight = if id =~ Readability.regex(:negative), do: weight - 25, else: weight
     weight
   end
 
+  @doc """
+  Calculates the ratio of link text to total text in a node.
+  """
+  @spec calc_link_density(html_tree) :: float
   def calc_link_density(html_tree) do
     text_length = Queries.text_length(html_tree)
 
@@ -74,7 +89,7 @@ defmodule Readability.Candidate.Scoring do
   defp calc_children_content_score({_, _, children_tree}) do
     children_tree
     |> Enum.filter(&(is_tuple(&1) && Readability.CandidateFinder.candidate_tag?(&1)))
-    |> calc_content_score
+    |> calc_content_score()
   end
 
   defp calc_grand_children_content_score({_, _, children_tree}) do
@@ -84,7 +99,7 @@ defmodule Readability.Candidate.Scoring do
       |> Enum.map(&elem(&1, 2))
       |> List.flatten()
       |> Enum.filter(&(is_tuple(&1) && Readability.CandidateFinder.candidate_tag?(&1)))
-      |> calc_content_score
+      |> calc_content_score()
 
     score / 2
   end

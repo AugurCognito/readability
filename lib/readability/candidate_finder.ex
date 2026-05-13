@@ -1,8 +1,6 @@
 defmodule Readability.CandidateFinder do
   @moduledoc """
-  The builing and finding candidates  engine.
-
-  It traverses the HTML tree searching, removing, socring nodes.
+  Traverses the HTML tree to find and score candidate article nodes.
   """
 
   alias Readability.Candidate
@@ -13,7 +11,7 @@ defmodule Readability.CandidateFinder do
   @type options :: list
 
   @doc """
-  Find candidates that should be meaningful article by analysing nodes.
+  Finds candidate nodes by traversing the tree and scoring each.
   """
   @spec find(html_tree, options, number) :: [Candidate.t()]
   def find(_, opts \\ [], tree_depth \\ 0)
@@ -43,18 +41,17 @@ defmodule Readability.CandidateFinder do
   end
 
   @doc """
-  Find the highest score candidate.
+  Returns the candidate with the highest score.
   """
-  @spec find_best_candidate([Candidate.t()]) :: Candidate.t()
+  @spec find_best_candidate([Candidate.t()]) :: Candidate.t() | nil
   def find_best_candidate([]), do: nil
 
   def find_best_candidate(candidates) do
-    candidates
-    |> Enum.max_by(fn candidate -> candidate.score end)
+    Enum.max_by(candidates, & &1.score)
   end
 
   @doc """
-  Check `html_tree` can be candidate or not.
+  Checks whether a node qualifies as a scoring candidate (p/td with enough text).
   """
   @spec candidate_tag?(html_tree) :: boolean
   def candidate_tag?({tag, _, _} = html_tree) do

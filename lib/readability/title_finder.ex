@@ -1,7 +1,11 @@
 defmodule Readability.TitleFinder do
   @moduledoc """
-  The TitleFinder engine traverses HTML tree searching for finding title.
+  Extracts the article title from an HTML tree.
+
+  Checks (in order): og:title meta tag, `<title>` tag, `<h1>` tag.
   """
+
+  alias Readability.Queries
 
   @title_suffix ~r/\s(?:\-|\:\:|\|)\s/
   @h_tag_selector "h1"
@@ -9,7 +13,7 @@ defmodule Readability.TitleFinder do
   @type html_tree :: tuple | list
 
   @doc """
-  Find proper title.
+  Finds the best title from the HTML tree.
   """
   @spec title(html_tree) :: binary
   def title(html_tree) do
@@ -30,51 +34,65 @@ defmodule Readability.TitleFinder do
   end
 
   @doc """
-  Find title from title tag.
+  Finds the title from the `<title>` tag.
   """
   @spec tag_title(html_tree) :: binary
   def tag_title(html_tree) do
     html_tree
-    |> find_tag("head title")
+    |> find_tag_nodes("title")
     |> clean_title()
     |> String.split(@title_suffix)
     |> hd()
   end
 
   @doc """
-  Find title from `og:title` property of meta tag.
+  Finds the title from the `og:title` meta property.
   """
   @spec og_title(html_tree) :: binary
   def og_title(html_tree) do
     html_tree
-    |> find_tag("meta[property='og:title']")
-    |> Floki.attribute("content")
+    |> find_meta_content("og:title")
     |> clean_title()
   end
 
   @doc """
-  Find title from `h` tag.
+  Finds the title from an `<h>` tag.
   """
   @spec h_tag_title(html_tree, String.t()) :: binary
-  def h_tag_title(html_tree, selector \\ @h_tag_selector) do
+  def h_tag_title(html_tree, tag \\ @h_tag_selector) do
     html_tree
-    |> find_tag(selector)
+    |> find_tag_nodes(tag)
     |> clean_title()
   end
 
-  defp find_tag(html_tree, selector) do
-    case Floki.find(html_tree, selector) do
-      [] ->
-        []
-
-      matches when is_list(matches) ->
-        hd(matches)
+  # Find the first node matching a tag name
+  defp find_tag_nodes(html_tree, tag) do
+    case Queries.find_tag(html_tree, tag) do
+      [] -> []
+      [first | _] -> first
     end
   end
 
-  defp clean_title([]) do
-    ""
+  # Find meta tag content by property value
+  defp find_meta_content(html_tree, property) do
+    html_tree
+    |> Queries.find_tag("meta")
+    |> Enum.find(fn {_, attrs, _} ->
+      List.keyfind(attrs, "property", 0) == {"property", property}
+    end)
+    |> case do
+      nil ->
+        []
+
+      {_, attrs, _} ->
+        case List.keyfind(attrs, "content", 0) do
+          {"content", value} -> [value]
+          _ -> []
+        end
+    end
   end
+
+  defp clean_title([]), do: ""
 
   defp clean_title([title]) when is_binary(title) do
     String.trim(title)
@@ -82,7 +100,7 @@ defmodule Readability.TitleFinder do
 
   defp clean_title(html_tree) do
     html_tree
-    |> Floki.text()
+    |> Queries.text()
     |> String.trim()
   end
 
